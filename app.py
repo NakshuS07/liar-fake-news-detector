@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
+import pickle
 import re
 import string
 import nltk
@@ -11,19 +11,26 @@ from collections import Counter
 import textstat
 from textblob import TextBlob
 
-nltk.download('stopwords', quiet=True)
-nltk.download('punkt', quiet=True)
-nltk.download('punkt_tab', quiet=True)
-nltk.download('averaged_perceptron_tagger', quiet=True)
-nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+# ---------- NLTK setup (runs on Streamlit Cloud boot) ----------
+@st.cache_resource
+def setup_nltk():
+    for pkg in ['stopwords', 'punkt', 'punkt_tab',
+                'averaged_perceptron_tagger', 'averaged_perceptron_tagger_eng']:
+        nltk.download(pkg, quiet=True)
+    return True
 
+setup_nltk()
 stop_words = set(stopwords.words('english'))
 
+
+# ---------- Load model with pickle ----------
 @st.cache_resource
 def load_model():
-    return joblib.load('fake_news_model.pkl')
+    with open('fake_news_model.pkl', 'rb') as f:
+        return pickle.load(f)
 
 model = load_model()
+
 
 # ---------- Helper functions ----------
 def clean_text(text):
@@ -34,6 +41,7 @@ def clean_text(text):
     text = re.sub(r'[^a-zA-Z\s]', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
 
 def get_pos_distribution(text):
     default = {
@@ -52,7 +60,8 @@ def get_pos_distribution(text):
     counts = Counter(tag for _, tag in tags)
 
     def ratio(prefixes):
-        return sum(v for k, v in counts.items() if any(k.startswith(p) for p in prefixes)) / total
+        return sum(v for k, v in counts.items()
+                   if any(k.startswith(p) for p in prefixes)) / total
 
     dist = {
         'pos_noun_ratio':  ratio(['NN']),
@@ -66,12 +75,13 @@ def get_pos_distribution(text):
     dist['pos_other_ratio'] = max(0.0, 1 - sum(dist.values()))
     return dist, tags
 
+
 def extract_features(text):
     if not text or len(text.split()) < 3:
         base = {k: 0 for k in [
-            'exclamation_count','question_count','all_caps_ratio',
-            'punctuation_ratio','readability_flesch','sentiment_polarity',
-            'sentiment_subjectivity','avg_word_length','unique_word_ratio',
+            'exclamation_count', 'question_count', 'all_caps_ratio',
+            'punctuation_ratio', 'readability_flesch', 'sentiment_polarity',
+            'sentiment_subjectivity', 'avg_word_length', 'unique_word_ratio',
             'stopword_ratio']}
         pos_dist, _ = get_pos_distribution(text)
         base.update(pos_dist)
@@ -80,8 +90,8 @@ def extract_features(text):
     words = text.split()
     total_chars = len(text)
     exclamation = text.count('!')
-    question    = text.count('?')
-    caps_words  = sum(1 for w in words if w.isupper() and len(w) > 2)
+    question = text.count('?')
+    caps_words = sum(1 for w in words if w.isupper() and len(w) > 2)
     all_caps_ratio = caps_words / max(len(words), 1)
     punct_chars = sum(1 for c in text if c in string.punctuation)
     punct_ratio = punct_chars / max(total_chars, 1)
@@ -92,12 +102,12 @@ def extract_features(text):
         flesch = 0
 
     blob = TextBlob(text)
-    polarity     = blob.sentiment.polarity
+    polarity = blob.sentiment.polarity
     subjectivity = blob.sentiment.subjectivity
 
     avg_word_len = np.mean([len(w) for w in words]) if words else 0
     unique_ratio = len(set(words)) / max(len(words), 1)
-    stop_ratio   = sum(1 for w in words if w in stop_words) / max(len(words), 1)
+    stop_ratio = sum(1 for w in words if w in stop_words) / max(len(words), 1)
 
     features = {
         'exclamation_count': exclamation,
@@ -114,6 +124,7 @@ def extract_features(text):
     pos_dist, _ = get_pos_distribution(text)
     features.update(pos_dist)
     return features
+
 
 def get_problem_flags(f):
     flags = []
@@ -139,6 +150,7 @@ def get_problem_flags(f):
         flags.append(f"High adverb density ({f['pos_adv_ratio']:.1%}) — intensifiers/hyperbole")
     return flags
 
+
 POS_LABELS = {
     'pos_noun_ratio':  'Nouns (NN*)',
     'pos_verb_ratio':  'Verbs (VB*)',
@@ -163,15 +175,15 @@ with st.sidebar:
             "Realistic accuracy on LIAR is ~0.70–0.85.")
 
 user_title = st.text_input("Statement Title (optional)", placeholder="Enter headline...")
-user_text  = st.text_area("Statement / Claim", height=200,
-                          placeholder="Paste the claim or statement here...")
+user_text = st.text_area("Statement / Claim", height=200,
+                         placeholder="Paste the claim or statement here...")
 
-# ---------- Optional speaker/context metadata (defaults are neutral) ----------
 with st.expander("Optional: Speaker & context metadata (improves accuracy)"):
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         party = st.selectbox("Speaker party",
-                             ['unknown', 'republican', 'democrat', 'independent', 'none', 'libertarian'])
+                             ['unknown', 'republican', 'democrat',
+                              'independent', 'none', 'libertarian'])
     with col_b:
         job_title = st.selectbox("Speaker job title",
                                  ['unknown', 'president', 'senator', 'representative',
@@ -185,22 +197,21 @@ with st.expander("Optional: Speaker & context metadata (improves accuracy)"):
     context_choice = st.selectbox("Context",
                                   ['unknown', 'speech', 'debate', 'rally', 'interview',
                                    'ad', 'tweet', 'news release'])
-    speaker_reliability = st.slider("Speaker reliability score (-1 = unreliable, +1 = reliable)",
-                                    min_value=-1.0, max_value=1.0, value=0.0, step=0.05)
+    speaker_reliability = st.slider(
+        "Speaker reliability score (-1 = unreliable, +1 = reliable)",
+        min_value=-1.0, max_value=1.0, value=0.0, step=0.05)
 
 if st.button("🔍 Analyze", type="primary"):
     if not user_text or len(user_text.split()) < 5:
         st.warning("Please enter at least 5 words of statement text.")
     else:
         clean_title = clean_text(user_title)
-        clean_body  = clean_text(user_text)
-        full_text   = (clean_title + ' ' + clean_body).strip()
+        clean_body = clean_text(user_text)
+        full_text = (clean_title + ' ' + clean_body).strip()
 
         feats = extract_features(user_text)
 
-        # ---- Fill in the metadata columns the model now expects ----
         feats.update({
-            # Speaker credit history — defaults to zeros when unknown
             'count_barely_true': 0,
             'count_false': 0,
             'count_half_true': 0,
@@ -209,8 +220,6 @@ if st.button("🔍 Analyze", type="primary"):
             'truth_ratio': max(0.0, speaker_reliability),
             'fake_ratio': max(0.0, -speaker_reliability),
             'speaker_reliability': speaker_reliability,
-
-            # Context flags
             'is_debate':       int(context_choice == 'debate'),
             'is_rally':        int(context_choice == 'rally'),
             'is_interview':    int(context_choice == 'interview'),
@@ -218,8 +227,6 @@ if st.button("🔍 Analyze", type="primary"):
             'is_tweet':        int(context_choice == 'tweet'),
             'is_news_release': int(context_choice == 'news release'),
             'is_speech':       int(context_choice == 'speech'),
-
-            # Categorical metadata
             'party':           party,
             'job_title':       job_title,
             'subject_primary': subject_primary,
@@ -228,7 +235,7 @@ if st.button("🔍 Analyze", type="primary"):
         input_df = pd.DataFrame([{**{'full_text': full_text}, **feats}])
 
         proba = model.predict_proba(input_df)[0]
-        pred  = model.predict(input_df)[0]
+        pred = model.predict(input_df)[0]
         confidence = proba[pred] * 100
 
         col1, col2 = st.columns([1, 2])
@@ -269,6 +276,3 @@ if st.button("🔍 Analyze", type="primary"):
                 else:
                     st.info("Not enough text to extract POS tags.")
 
-st.markdown("---")
-st.caption("⚠️ Student capstone project using the LIAR benchmark. "
-           "Always verify claims through multiple trusted sources.")
